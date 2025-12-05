@@ -24,6 +24,7 @@ from evaluate import load
 import pickle
 import sys
 from typing import Iterable, Iterator
+import ast
 
 # %%
 os.environ["CUDA_VISIBLE_DEVICES"] = os.environ.get("CUDA_VISIBLE_DEVICES", "2")
@@ -98,7 +99,29 @@ response = qwen_coder_chat(prompt_start+prompt_end)
 print(response)
 
 
-# %%
+# %% Helper filters and execution guards
+UNSAFE_CODE_PATTERNS = [
+    ("import_os", re.compile(r"\bimport\s+os\b", re.IGNORECASE)),
+    ("os_usage", re.compile("\\bos\\s*\\.", re.IGNORECASE)),
+    ("subprocess", re.compile(r"\bsubprocess\b", re.IGNORECASE)),
+    ("shutil", re.compile(r"\bshutil\b", re.IGNORECASE)),
+    ("pathlib", re.compile(r"\bpathlib\b", re.IGNORECASE)),
+    ("file_io", re.compile(r"\b(open|os\.path|pathlib\.Path)\b", re.IGNORECASE)),
+]
+
+TEST_SKIP_PATTERNS = [
+    ("input_required", re.compile(r"\binput\s*\(", re.IGNORECASE)),
+    ("file_io", re.compile(r"\b(open|os\.|pathlib\.)", re.IGNORECASE)),
+    ("network", re.compile(r"\b(requests|urllib|httpx|http\.client)\b", re.IGNORECASE)),
+    ("database", re.compile(r"\bsqlite3\b", re.IGNORECASE)),
+    ("server_runtime", re.compile(r"\bFlask\b|app\.run\(|run_server\(", re.IGNORECASE)),
+    ("system_monitoring", re.compile(r"\bpsutil\b", re.IGNORECASE)),
+    ("heavy_deps", re.compile(r"\b(matplotlib|wordcloud|pandas|numpy|sklearn|nltk)\b", re.IGNORECASE)),
+    ("random_maze", re.compile(r"\b(random|randrange)\b.*\bmaze\b|\bmaze\b.*\b(random|randrange)\b", re.IGNORECASE)),
+    ("sleep_or_loop", re.compile(r"\btime\.sleep\b|while\s+True", re.IGNORECASE)),
+]
+
+
 def unwrap_code(text: str) -> str:
     """
     Remove optional <think> blocks, then return the last ```python ... ``` block.
@@ -112,18 +135,31 @@ def unwrap_code(text: str) -> str:
         return code_blocks[-1].strip()
     return text_without_think.strip()
 
-code = unwrap_code(response)
-print(code)
 
+def keep_necessary(code: str) -> str:
+    """Keep only imports and class/function definitions (with their bodies)."""
+    lines = code.splitlines()
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return "\n".join([ln for ln in lines if ln.lstrip().startswith(("import ", "from "))])
 
-UNSAFE_CODE_PATTERNS = [
-    ("import_os", re.compile(r"\bimport\s+os\b", re.IGNORECASE)),
-    ("os_usage", re.compile(r"\bos\s*\.", re.IGNORECASE)),
-    ("subprocess", re.compile(r"\bsubprocess\b", re.IGNORECASE)),
-    ("shutil", re.compile(r"\bshutil\b", re.IGNORECASE)),
-    ("pathlib", re.compile(r"\bpathlib\b", re.IGNORECASE)),
-    ("file_io", re.compile(r"\b(open|os\.path|pathlib\.Path)\b", re.IGNORECASE)),
-]
+    keep: set[int] = set()
+
+    def mark_span(node: ast.AST):
+        start = getattr(node, "lineno", None)
+        end = getattr(node, "end_lineno", start)
+        if start is None:
+            return
+        for ln in range(start, (end or start) + 1):
+            keep.add(ln)
+
+    for node in tree.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            mark_span(node)
+
+    filtered = [line for idx, line in enumerate(lines, start=1) if idx in keep]
+    return "\n".join(filtered)
 
 
 def detect_environment_access(code_str: str) -> list[str]:
@@ -134,25 +170,78 @@ def detect_environment_access(code_str: str) -> list[str]:
     return matches
 
 
+def detect_test_issues(unit_tests: list[str]) -> list[str]:
+    """Detect tests that require external resources or interactive input."""
+    combined = "\n".join(unit_tests)
+    matches: list[str] = []
+    for label, pattern in TEST_SKIP_PATTERNS:
+        if pattern.search(combined):
+            matches.append(label)
+    return matches
+
+
+def run_with_timeout(fn, timeout_sec: float):
+    import concurrent.futures
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(fn)
+        try:
+            return future.result(timeout=timeout_sec), None
+        except concurrent.futures.TimeoutError:
+            return None, "timeout"
+        except Exception as exc:  # pylint: disable=broad-except
+            return None, f"{exc!r}"
+
+
+code = unwrap_code(response)
+print(code)
+
+
+def detect_test_issues(unit_tests: list[str]) -> list[str]:
+    """Detect tests that require external resources or interactive input."""
+    combined = "\n".join(unit_tests)
+    matches: list[str] = []
+    for label, pattern in TEST_SKIP_PATTERNS:
+        if pattern.search(combined):
+            matches.append(label)
+    return matches
+
+
+def run_with_timeout(fn, timeout_sec: float):
+    import concurrent.futures
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(fn)
+        try:
+            return future.result(timeout=timeout_sec), None
+        except concurrent.futures.TimeoutError:
+            return None, "timeout"
+        except Exception as exc:  # pylint: disable=broad-except
+            return None, f"{exc!r}"
+
+
 # %%
 def evaluate_sample(code_str: str, unit_tests: list[str], entry_point: str | None) -> tuple[float, int, int, list[str]]:
     ns: dict[str, object] = {}
     errors: list[str] = []
-    try:
+
+    def _exec_code():
         exec(code_str, ns)
-    except Exception as exc:  # pylint: disable=broad-except
-        return 0.0, 0, len(unit_tests), [f"code_exec_error: {exc!r}"]
+
+    _, code_err = run_with_timeout(_exec_code, timeout_sec=5.0)
+    if code_err:
+        return 0.0, 0, len(unit_tests), [f"code_exec_error: {code_err}"]
 
     if entry_point and entry_point in ns and callable(ns[entry_point]):
         ns["candidate"] = ns[entry_point]
 
     passed = 0
     for idx, test_snippet in enumerate(unit_tests):
-        try:
-            exec(test_snippet, ns)
-            passed += 1
-        except Exception as exc:  # pylint: disable=broad-except
-            errors.append(f"test_{idx}_error: {exc!r}")
+        _, test_err = run_with_timeout(lambda: exec(test_snippet, ns), timeout_sec=3.0)
+        if test_err:
+            errors.append(f"test_{idx}_error: {test_err}")
+            continue
+        passed += 1
 
     total = len(unit_tests)
     ratio = passed / total if total else 0.0
@@ -178,9 +267,40 @@ for idx, (instruction, tests, entry_point) in enumerate(
     if not instruction or not tests:
         continue
 
+    if not entry_point:
+        record = {
+            "id": idx,
+            "instruction": instruction,
+            "generated_code": "",
+            "tests_passed": 0,
+            "tests_total": len(tests),
+            "test_ratio": 0.0,
+            "errors": ["skipped_missing_entry_point"],
+            "skipped": True,
+        }
+        results.append(record)
+        processed += 1
+        continue
+
+    test_skip_reasons = detect_test_issues(tests)
+    if test_skip_reasons:
+        record = {
+            "id": idx,
+            "instruction": instruction,
+            "generated_code": "",
+            "tests_passed": 0,
+            "tests_total": len(tests),
+            "test_ratio": 0.0,
+            "errors": [f"skipped_test_issue: {', '.join(test_skip_reasons)}"],
+            "skipped": True,
+        }
+        results.append(record)
+        processed += 1
+        continue
+
     prompt = prompt_start + instruction
     raw_response = qwen_coder_chat(prompt)
-    generated_code = unwrap_code(raw_response)
+    generated_code = keep_necessary(unwrap_code(raw_response))
     unsafe_reasons = detect_environment_access(generated_code)
     if unsafe_reasons:
         record = {
