@@ -7,8 +7,11 @@ running the script. You can control which slice to export using CLI flags.
 from __future__ import annotations
 
 import argparse
+import ast
+import builtins
 import json
 import re
+from collections import Counter
 from itertools import islice
 from typing import Iterable
 
@@ -20,7 +23,11 @@ CONFIG = "train"
 SPLIT = "train"
 DEFAULT_ROWS_STARTFROM = 0
 DEFAULT_ROWS_TO_DOWNLOAD = 10_000
-FUNC_NAME_RE = re.compile(r"assert\s+([a-zA-Z_]\w*)\s*\(")
+ASSERT_CALL_RE = re.compile(r"assert\s+([a-zA-Z_]\w*)\s*\(")
+PROMPT_NAME_RE = re.compile(r"(?:function|method|class)\s+`([a-zA-Z_]\w*)`", re.IGNORECASE)
+PROMPT_CALL_RE = re.compile(r"`([a-zA-Z_]\w*)\s*\(")
+PROMPT_DEF_RE = re.compile(r"\bdef\s+([a-zA-Z_]\w*)\s*\(")
+DISALLOWED_ENTRY_POINTS = set(dir(builtins)) | {"check", "candidate"}
 
 
 def parse_unit_tests(raw_tests: str | None) -> list[str] | str | None:
@@ -45,11 +52,53 @@ def _unit_tests_iterable(unit_tests: list[str] | str | None) -> Iterable[str]:
 	return ()
 
 
-def extract_entry_point(unit_tests: list[str] | str | None) -> str | None:
+def _iter_called_names(test_src: str) -> Iterable[str]:
+	try:
+		tree = ast.parse(test_src)
+	except SyntaxError:
+		return ()
+
+	names: list[str] = []
+	for node in ast.walk(tree):
+		if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+			names.append(node.func.id)
+	return names
+
+
+def _iter_prompt_candidates(prompt: str | None) -> Iterable[str]:
+	if not prompt:
+		return ()
+
+	names: list[str] = []
+	for pattern in (PROMPT_NAME_RE, PROMPT_CALL_RE, PROMPT_DEF_RE):
+		names.extend(pattern.findall(prompt))
+	return names
+
+
+def extract_entry_point(unit_tests: list[str] | str | None, prompt: str | None = None) -> str | None:
+	"""Infer a likely callable under test from tests and task prompt text."""
+	counts: Counter[str] = Counter()
+	ordered_candidates: list[str] = []
+
+	def add(name: str, weight: int = 1) -> None:
+		if name not in counts:
+			ordered_candidates.append(name)
+		counts[name] += weight
+
 	for test in _unit_tests_iterable(unit_tests):
-		match = FUNC_NAME_RE.search(test)
-		if match:
-			return match.group(1)
+		for name in ASSERT_CALL_RE.findall(test):
+			add(name, weight=4)
+		for name in _iter_called_names(test):
+			add(name, weight=1)
+
+	for name in _iter_prompt_candidates(prompt):
+		add(name, weight=2)
+
+	scored = sorted(ordered_candidates, key=lambda name: (-counts[name], ordered_candidates.index(name)))
+	for name in scored:
+		if name in DISALLOWED_ENTRY_POINTS:
+			continue
+		return name
 	return None
 
 
@@ -92,7 +141,7 @@ def main(argv: Iterable[str] | None = None) -> None:
 				"id": row_idx,
 				"input": row.get("input"),
 				"unit_tests": parsed_tests,
-				"entry_point": extract_entry_point(parsed_tests),
+				"entry_point": extract_entry_point(parsed_tests, row.get("input")),
 			}
 			sink.write(json.dumps(record, ensure_ascii=False) + "\n")
 			count += 1
