@@ -21,6 +21,8 @@ from tqdm import tqdm
 import re
 import json
 import ast
+import subprocess
+import sys
 
 # %%
 os.environ["CUDA_VISIBLE_DEVICES"] = os.environ.get("CUDA_VISIBLE_DEVICES", "2")
@@ -180,17 +182,46 @@ def detect_test_issues(unit_tests: list[str]) -> list[str]:
     return matches
 
 
-def run_with_timeout(fn, timeout_sec: float):
-    import concurrent.futures
+ISOLATED_EVAL_SCRIPT = r"""
+import contextlib
+import io
+import json
+import sys
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(fn)
+def main():
+    payload = json.loads(sys.stdin.read())
+    code_str = payload["code_str"]
+    unit_tests = payload["unit_tests"]
+    entry_point = payload.get("entry_point")
+
+    ns = {}
+    errors = []
+    passed = 0
+    total = len(unit_tests)
+
+    try:
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            exec(code_str, ns)
+    except Exception as exc:
+        print(json.dumps({"status": "code_error", "error": f"{exc!r}", "total": total}))
+        return
+
+    if entry_point and entry_point in ns and callable(ns[entry_point]):
+        ns["candidate"] = ns[entry_point]
+
+    for idx, test_snippet in enumerate(unit_tests):
         try:
-            return future.result(timeout=timeout_sec), None
-        except concurrent.futures.TimeoutError:
-            return None, "timeout"
-        except Exception as exc:  # pylint: disable=broad-except
-            return None, f"{exc!r}"
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                exec(test_snippet, ns)
+            passed += 1
+        except Exception as exc:
+            errors.append(f"test_{idx}_error: {exc!r}")
+
+    print(json.dumps({"status": "ok", "passed": passed, "total": total, "errors": errors}))
+
+if __name__ == "__main__":
+    main()
+"""
 
 
 code = unwrap_code(response)
@@ -199,28 +230,48 @@ print(code)
 
 # %%
 def evaluate_sample(code_str: str, unit_tests: list[str], entry_point: str | None) -> tuple[float, int, int, list[str]]:
-    ns: dict[str, object] = {}
-    errors: list[str] = []
+    payload = {
+        "code_str": code_str,
+        "unit_tests": unit_tests,
+        "entry_point": entry_point,
+    }
+    timeout_sec = max(8, 3 * len(unit_tests))
 
-    def _exec_code():
-        exec(code_str, ns)
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-c", ISOLATED_EVAL_SCRIPT],
+            input=json.dumps(payload),
+            text=True,
+            capture_output=True,
+            timeout=timeout_sec,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return 0.0, 0, len(unit_tests), [f"timeout_after_{timeout_sec}s"]
+    except Exception as exc:  # pylint: disable=broad-except
+        return 0.0, 0, len(unit_tests), [f"evaluator_exec_error: {exc!r}"]
 
-    _, code_err = run_with_timeout(_exec_code, timeout_sec=5.0)
-    if code_err:
-        return 0.0, 0, len(unit_tests), [f"code_exec_error: {code_err}"]
+    if completed.returncode != 0:
+        stderr = (completed.stderr or "").strip()
+        return 0.0, 0, len(unit_tests), [f"evaluator_process_error: {stderr or 'non-zero exit'}"]
 
-    if entry_point and entry_point in ns and callable(ns[entry_point]):
-        ns["candidate"] = ns[entry_point]
+    output = (completed.stdout or "").strip()
+    if not output:
+        return 0.0, 0, len(unit_tests), ["evaluator_protocol_error: empty_stdout"]
 
-    passed = 0
-    for idx, test_snippet in enumerate(unit_tests):
-        _, test_err = run_with_timeout(lambda: exec(test_snippet, ns), timeout_sec=3.0)
-        if test_err:
-            errors.append(f"test_{idx}_error: {test_err}")
-            continue
-        passed += 1
+    try:
+        result = json.loads(output.splitlines()[-1])
+    except json.JSONDecodeError:
+        return 0.0, 0, len(unit_tests), [f"evaluator_protocol_error: invalid_json: {output[:200]}"]
 
-    total = len(unit_tests)
+    total = int(result.get("total", len(unit_tests)))
+    if result.get("status") == "code_error":
+        return 0.0, 0, total, [f"code_exec_error: {result.get('error', 'unknown')}"]
+
+    passed = int(result.get("passed", 0))
+    errors = result.get("errors", [])
+    if not isinstance(errors, list):
+        errors = [f"evaluator_protocol_error: invalid_errors_field: {errors!r}"]
     ratio = passed / total if total else 0.0
     return ratio, passed, total, errors
 
