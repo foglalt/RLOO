@@ -88,7 +88,8 @@ MAX_COMPLETION_LENGTH = 256
 TEMPERATURE = 0.7
 TOP_P = 0.95
 LOGGING_STEPS = 10
-SAVE_STEPS = 100
+SAVE_STEPS = 100  # Used only if SAVE_STRATEGY is changed from "no".
+SAVE_STRATEGY = "no"
 EVAL_STEPS = 100
 SEED = 42
 USE_BF16 = False
@@ -501,6 +502,7 @@ def main() -> None:
         do_eval=True,
         eval_strategy="steps",
         eval_steps=EVAL_STEPS,
+        save_strategy=SAVE_STRATEGY,
         logging_strategy=LOGGING_STRATEGY,
         log_level="error",
         log_level_replica="error",
@@ -517,6 +519,8 @@ def main() -> None:
         top_p=TOP_P,
         logging_steps=LOGGING_STEPS,
         save_steps=SAVE_STEPS,
+        save_only_model=True,
+        save_total_limit=1,
         seed=SEED,
         bf16=USE_BF16,
         remove_unused_columns=False,
@@ -549,6 +553,7 @@ def main() -> None:
     )
 
     trainer.train()
+    trainer.save_state()
     trainer.save_model(OUTPUT_DIR)
 
 
