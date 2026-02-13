@@ -5,6 +5,8 @@ import pandas as pd
 from tqdm import tqdm
 import re
 import json
+import subprocess
+import sys
 
 os.environ["CUDA_VISIBLE_DEVICES"] = os.environ.get("CUDA_VISIBLE_DEVICES", "2")
 
@@ -104,21 +106,78 @@ def evaluate_single_sample(code_str: str, test_code: str, entry_point: str):
         score: 1.0 if all tests pass, 0.0 otherwise
         error: optional error string (None if all tests pass)
     """
+    isolated_script = r"""
+import contextlib
+import io
+import json
+import sys
+
+def main():
+    payload = json.loads(sys.stdin.read())
+    code_str = payload["code_str"]
+    test_code = payload["test_code"]
+    entry_point = payload.get("entry_point")
+
     ns = {}
     try:
-        exec(code_str, ns)
-    except Exception as e:
-        return 0.0, f"code_exec_error: {repr(e)}"
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            exec(code_str, ns)
+    except Exception as exc:
+        print(json.dumps({"status": "code_error", "error": f"{exc!r}"}))
+        return
 
-    # Expose the function under a common 'candidate' name if present
-    if entry_point in ns and callable(ns[entry_point]):
+    if entry_point and entry_point in ns and callable(ns[entry_point]):
         ns["candidate"] = ns[entry_point]
 
     try:
-        exec(test_code, ns)
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            exec(test_code, ns)
+        print(json.dumps({"status": "pass"}))
+    except Exception as exc:
+        print(json.dumps({"status": "test_error", "error": f"{exc!r}"}))
+
+if __name__ == "__main__":
+    main()
+"""
+
+    payload = {
+        "code_str": code_str,
+        "test_code": test_code,
+        "entry_point": entry_point,
+    }
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-c", isolated_script],
+            input=json.dumps(payload),
+            text=True,
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return 0.0, "test_exec_error: timeout_after_15s"
+    except Exception as exc:  # pylint: disable=broad-except
+        return 0.0, f"test_exec_error: evaluator_exec_error: {exc!r}"
+
+    if completed.returncode != 0:
+        stderr = (completed.stderr or "").strip()
+        return 0.0, f"test_exec_error: evaluator_process_error: {stderr or 'non-zero exit'}"
+
+    output = (completed.stdout or "").strip()
+    if not output:
+        return 0.0, "test_exec_error: evaluator_protocol_error: empty_stdout"
+
+    try:
+        result = json.loads(output.splitlines()[-1])
+    except json.JSONDecodeError:
+        return 0.0, f"test_exec_error: evaluator_protocol_error: invalid_json: {output[:200]}"
+
+    status = result.get("status")
+    if status == "pass":
         return 1.0, None
-    except Exception as e:
-        return 0.0, f"test_exec_error: {repr(e)}"
+    if status == "code_error":
+        return 0.0, f"code_exec_error: {result.get('error', 'unknown')}"
+    return 0.0, f"test_exec_error: {result.get('error', 'unknown')}"
 
 result, error = evaluate_single_sample(code,test,entry_point)
 print(f'result:{result} error:{error}')
@@ -179,5 +238,4 @@ print(f"Failed: {num_fail}")
 print(f"Pass@1 (test pass ratio): {pass_ratio:.4f}")
 
 # -
-
 
