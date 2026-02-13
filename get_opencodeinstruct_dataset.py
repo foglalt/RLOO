@@ -94,7 +94,8 @@ def extract_entry_point(unit_tests: list[str] | str | None, prompt: str | None =
 	for name in _iter_prompt_candidates(prompt):
 		add(name, weight=2)
 
-	scored = sorted(ordered_candidates, key=lambda name: (-counts[name], ordered_candidates.index(name)))
+	order = {name: idx for idx, name in enumerate(ordered_candidates)}
+	scored = sorted(ordered_candidates, key=lambda name: (-counts[name], order[name]))
 	for name in scored:
 		if name in DISALLOWED_ENTRY_POINTS:
 			continue

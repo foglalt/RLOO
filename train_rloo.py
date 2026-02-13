@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import io
 import json
 import re
 import subprocess
