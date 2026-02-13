@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import contextlib
 import json
 from pathlib import Path
@@ -65,49 +64,39 @@ if __name__ == "__main__":
 """
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train a Qwen model with TRL RLOO on OpenCodeInstruct")
-    parser.add_argument("--model-id", required=True, help="Model path or HF id")
-    parser.add_argument(
-        "--dataset-path",
-        default="opencodeinstruct_0_30000.jsonl",
-        help="JSONL exported by get_opencodeinstruct_dataset.py",
-    )
-    parser.add_argument(
-        "--eval-path",
-        default="opencodeinstruct_eval_100.jsonl",
-        help="JSONL hold-out set used for periodic evaluation diagnostics",
-    )
-    parser.add_argument("--output-dir", required=True, help="Where to save checkpoints")
-    parser.add_argument("--max-samples", type=int, default=30_000, help="Limit number of training samples")
-    parser.add_argument("--learning-rate", type=float, default=1e-6)
-    parser.add_argument("--max-steps", type=int, default=200)
-    parser.add_argument("--per-device-train-batch-size", type=int, default=1)
-    parser.add_argument("--gradient-accumulation-steps", type=int, default=8)
-    parser.add_argument("--num-generations", type=int, default=2)
-    parser.add_argument("--max-prompt-length", type=int, default=768)
-    parser.add_argument("--max-completion-length", type=int, default=256)
-    parser.add_argument("--temperature", type=float, default=0.7)
-    parser.add_argument("--top-p", type=float, default=0.95)
-    parser.add_argument("--logging-steps", type=int, default=10)
-    parser.add_argument("--save-steps", type=int, default=100)
-    parser.add_argument("--eval-steps", type=int, default=100)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--bf16", action="store_true", help="Enable bf16 training")
-    parser.add_argument("--report-to", default=None, help="Comma-separated integrations, e.g. wandb")
-    parser.add_argument("--reward-timeout-sec", type=int, default=30)
-    parser.add_argument("--train-diagnostics-samples", type=int, default=100)
-    parser.add_argument("--eval-diagnostics-samples", type=int, default=100)
-    parser.add_argument("--diagnostics-every-steps", type=int, default=100)
-    parser.add_argument("--diagnostics-file", default=None, help="JSONL diagnostics output path")
-    parser.add_argument("--diagnostics-max-new-tokens", type=int, default=256)
-    parser.add_argument("--diagnostics-temperature", type=float, default=0.2)
-    parser.add_argument("--diagnostics-top-p", type=float, default=0.95)
-    parser.add_argument("--use-lora", action="store_true", help="Enable LoRA fine-tuning")
-    parser.add_argument("--lora-r", type=int, default=16)
-    parser.add_argument("--lora-alpha", type=int, default=32)
-    parser.add_argument("--lora-dropout", type=float, default=0.05)
-    return parser.parse_args()
+# Training configuration (edit these values directly).
+MODEL_ID = "/ssd/bszalontai_local/models_hf/Qwen2.5-Coder-1.5B-Instruct/"
+DATASET_PATH = "opencodeinstruct_0_30000.jsonl"
+EVAL_PATH = "opencodeinstruct_eval_100.jsonl"
+OUTPUT_DIR = "runs/qwen_rloo"
+MAX_SAMPLES = 30_000
+LEARNING_RATE = 1e-6
+MAX_STEPS = 200
+PER_DEVICE_TRAIN_BATCH_SIZE = 1
+GRADIENT_ACCUMULATION_STEPS = 8
+NUM_GENERATIONS = 2
+MAX_PROMPT_LENGTH = 768
+MAX_COMPLETION_LENGTH = 256
+TEMPERATURE = 0.7
+TOP_P = 0.95
+LOGGING_STEPS = 10
+SAVE_STEPS = 100
+EVAL_STEPS = 100
+SEED = 42
+USE_BF16 = False
+REPORT_TO = None  # Example: ["wandb"]
+REWARD_TIMEOUT_SEC = 30
+TRAIN_DIAGNOSTICS_SAMPLES = 100
+EVAL_DIAGNOSTICS_SAMPLES = 100
+DIAGNOSTICS_EVERY_STEPS = 100
+DIAGNOSTICS_FILE = None  # Defaults to OUTPUT_DIR/diagnostics.jsonl when None.
+DIAGNOSTICS_MAX_NEW_TOKENS = 256
+DIAGNOSTICS_TEMPERATURE = 0.2
+DIAGNOSTICS_TOP_P = 0.95
+USE_LORA = False
+LORA_R = 16
+LORA_ALPHA = 32
+LORA_DROPOUT = 0.05
 
 
 def unwrap_code(text: str) -> str:
@@ -433,89 +422,83 @@ class PeriodicDiagnosticsCallback(TrainerCallback):
         self._record(state, model)
 
 
-def maybe_build_peft_config(args: argparse.Namespace):
-    if not args.use_lora:
+def maybe_build_peft_config():
+    if not USE_LORA:
         return None
     from peft import LoraConfig, TaskType
 
     return LoraConfig(
         task_type=TaskType.CAUSAL_LM,
-        r=args.lora_r,
-        lora_alpha=args.lora_alpha,
-        lora_dropout=args.lora_dropout,
+        r=LORA_R,
+        lora_alpha=LORA_ALPHA,
+        lora_dropout=LORA_DROPOUT,
         bias="none",
         target_modules="all-linear",
     )
 
 
 def main() -> None:
-    args = parse_args()
-
-    report_to = None
-    if args.report_to:
-        report_to = [item.strip() for item in args.report_to.split(",") if item.strip()]
-
-    eval_dataset = build_dataset(args.eval_path, split_tag="eval")
+    eval_dataset = build_dataset(EVAL_PATH, split_tag="eval")
     eval_row_ids = {row["row_id"] for row in eval_dataset}
     train_dataset = build_dataset(
-        args.dataset_path,
-        max_samples=args.max_samples,
+        DATASET_PATH,
+        max_samples=MAX_SAMPLES,
         exclude_row_ids=eval_row_ids,
         split_tag="train",
     )
     print(f"Loaded train samples: {len(train_dataset)}")
     print(f"Loaded eval samples: {len(eval_dataset)}")
 
-    diagnostics_path = args.diagnostics_file or str(Path(args.output_dir) / "diagnostics.jsonl")
-    train_diagnostics_samples = sample_rows_for_diagnostics(train_dataset, args.train_diagnostics_samples)
-    eval_diagnostics_samples = sample_rows_for_diagnostics(eval_dataset, args.eval_diagnostics_samples)
+    diagnostics_path = DIAGNOSTICS_FILE or str(Path(OUTPUT_DIR) / "diagnostics.jsonl")
+    train_diagnostics_samples = sample_rows_for_diagnostics(train_dataset, TRAIN_DIAGNOSTICS_SAMPLES)
+    eval_diagnostics_samples = sample_rows_for_diagnostics(eval_dataset, EVAL_DIAGNOSTICS_SAMPLES)
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model_id, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    dtype = torch.bfloat16 if args.bf16 else torch.float16
+    dtype = torch.bfloat16 if USE_BF16 else torch.float16
     model = AutoModelForCausalLM.from_pretrained(
-        args.model_id,
+        MODEL_ID,
         torch_dtype=dtype,
         trust_remote_code=True,
         device_map="auto",
     )
 
     rloo_args = RLOOConfig(
-        output_dir=args.output_dir,
+        output_dir=OUTPUT_DIR,
         do_eval=True,
         eval_strategy="steps",
-        eval_steps=args.eval_steps,
-        learning_rate=args.learning_rate,
-        max_steps=args.max_steps,
-        per_device_train_batch_size=args.per_device_train_batch_size,
-        per_device_eval_batch_size=args.per_device_train_batch_size,
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        num_generations=args.num_generations,
-        max_prompt_length=args.max_prompt_length,
-        max_completion_length=args.max_completion_length,
-        temperature=args.temperature,
-        top_p=args.top_p,
-        logging_steps=args.logging_steps,
-        save_steps=args.save_steps,
-        seed=args.seed,
-        bf16=args.bf16,
+        eval_steps=EVAL_STEPS,
+        learning_rate=LEARNING_RATE,
+        max_steps=MAX_STEPS,
+        per_device_train_batch_size=PER_DEVICE_TRAIN_BATCH_SIZE,
+        per_device_eval_batch_size=PER_DEVICE_TRAIN_BATCH_SIZE,
+        gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
+        num_generations=NUM_GENERATIONS,
+        max_prompt_length=MAX_PROMPT_LENGTH,
+        max_completion_length=MAX_COMPLETION_LENGTH,
+        temperature=TEMPERATURE,
+        top_p=TOP_P,
+        logging_steps=LOGGING_STEPS,
+        save_steps=SAVE_STEPS,
+        seed=SEED,
+        bf16=USE_BF16,
         remove_unused_columns=False,
-        report_to=report_to,
+        report_to=REPORT_TO,
     )
 
-    reward_fn = make_reward_fn(timeout_sec=args.reward_timeout_sec)
+    reward_fn = make_reward_fn(timeout_sec=REWARD_TIMEOUT_SEC)
     diagnostics_callback = PeriodicDiagnosticsCallback(
         tokenizer=tokenizer,
         train_samples=train_diagnostics_samples,
         eval_samples=eval_diagnostics_samples,
-        reward_timeout_sec=args.reward_timeout_sec,
-        every_n_steps=args.diagnostics_every_steps,
+        reward_timeout_sec=REWARD_TIMEOUT_SEC,
+        every_n_steps=DIAGNOSTICS_EVERY_STEPS,
         output_path=diagnostics_path,
-        max_new_tokens=args.diagnostics_max_new_tokens,
-        temperature=args.diagnostics_temperature,
-        top_p=args.diagnostics_top_p,
+        max_new_tokens=DIAGNOSTICS_MAX_NEW_TOKENS,
+        temperature=DIAGNOSTICS_TEMPERATURE,
+        top_p=DIAGNOSTICS_TOP_P,
     )
     trainer = RLOOTrainer(
         model=model,
@@ -525,11 +508,11 @@ def main() -> None:
         eval_dataset=eval_dataset,
         processing_class=tokenizer,
         callbacks=[diagnostics_callback],
-        peft_config=maybe_build_peft_config(args),
+        peft_config=maybe_build_peft_config(),
     )
 
     trainer.train()
-    trainer.save_model(args.output_dir)
+    trainer.save_model(OUTPUT_DIR)
 
 
 if __name__ == "__main__":
