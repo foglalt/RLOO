@@ -74,7 +74,7 @@ if __name__ == "__main__":
 
 # Training configuration (edit these values directly).
 MODEL_ID = "/ssd/bszalontai_local/models_hf/Qwen2.5-Coder-1.5B-Instruct/"
-DATASET_PATH = "opencodeinstruct_0_30000.jsonl"
+DATASET_PATH = "opencodeinstruct_train_29541.jsonl"
 EVAL_PATH = "opencodeinstruct_eval_100.jsonl"
 OUTPUT_DIR = "runs/qwen_rloo"
 MAX_SAMPLES = 30_000
