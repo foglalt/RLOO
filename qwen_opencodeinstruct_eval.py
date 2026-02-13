@@ -82,6 +82,10 @@ assert os.path.exists(dataset_path), f"{dataset_path} not found"
 df = pd.read_json(dataset_path, lines=True)
 
 descriptions, unit_tests, entry_points = list(df["input"]), list(df["unit_tests"]), list(df["entry_point"])
+if "id" in df.columns:
+    row_ids = list(df["id"])
+else:
+    row_ids = list(range(len(df)))
 
 example_id = 20
 description, tests, entry_point = descriptions[example_id], unit_tests[example_id], entry_points[example_id]
@@ -193,29 +197,6 @@ code = unwrap_code(response)
 print(code)
 
 
-def detect_test_issues(unit_tests: list[str]) -> list[str]:
-    """Detect tests that require external resources or interactive input."""
-    combined = "\n".join(unit_tests)
-    matches: list[str] = []
-    for label, pattern in TEST_SKIP_PATTERNS:
-        if pattern.search(combined):
-            matches.append(label)
-    return matches
-
-
-def run_with_timeout(fn, timeout_sec: float):
-    import concurrent.futures
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(fn)
-        try:
-            return future.result(timeout=timeout_sec), None
-        except concurrent.futures.TimeoutError:
-            return None, "timeout"
-        except Exception as exc:  # pylint: disable=broad-except
-            return None, f"{exc!r}"
-
-
 # %%
 def evaluate_sample(code_str: str, unit_tests: list[str], entry_point: str | None) -> tuple[float, int, int, list[str]]:
     ns: dict[str, object] = {}
@@ -253,19 +234,25 @@ processed = 0
 begin=0
 end=10000
 
-for idx, (instruction, tests, entry_point) in enumerate(
-    tqdm(
-        list(zip(descriptions[begin:end], unit_tests[begin:end], entry_points[begin:end], strict=True)),
-        total=end-begin,
-        desc="Opencodeinstruct eval with Qwen2.5-Coder-1.5B",
-    )
-):  
+eval_total = min(end, len(descriptions)) - begin
+for row_id, instruction, tests, entry_point in tqdm(
+    zip(
+        row_ids[begin:end],
+        descriptions[begin:end],
+        unit_tests[begin:end],
+        entry_points[begin:end],
+        strict=True,
+    ),
+    total=eval_total,
+    desc="Opencodeinstruct eval with Qwen2.5-Coder-1.5B",
+):
+  
     if not instruction or not tests:
         continue
 
     if not entry_point:
         record = {
-            "id": idx,
+            "id": row_id,
             "instruction": instruction,
             "generated_code": "",
             "tests_passed": 0,
@@ -281,7 +268,7 @@ for idx, (instruction, tests, entry_point) in enumerate(
     test_skip_reasons = detect_test_issues(tests)
     if test_skip_reasons:
         record = {
-            "id": idx,
+            "id": row_id,
             "instruction": instruction,
             "generated_code": "",
             "tests_passed": 0,
@@ -300,7 +287,7 @@ for idx, (instruction, tests, entry_point) in enumerate(
     unsafe_reasons = detect_environment_access(generated_code)
     if unsafe_reasons:
         record = {
-            "id": idx,
+            "id": row_id,
             "instruction": instruction,
             "generated_code": generated_code,
             "tests_passed": 0,
@@ -313,10 +300,10 @@ for idx, (instruction, tests, entry_point) in enumerate(
         processed += 1
         continue
     ratio, passed, total, error_messages = evaluate_sample(generated_code, tests, entry_point)
-    error_messages = [ f"#{idx} {error}" for error in error_messages]
+    error_messages = [f"#{row_id} {error}" for error in error_messages]
 
     record = {
-        "id": idx,
+        "id": row_id,
         "instruction": instruction,
         "generated_code": generated_code,
         "tests_passed": passed,
