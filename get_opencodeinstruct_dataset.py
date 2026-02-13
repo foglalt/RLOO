@@ -28,6 +28,20 @@ PROMPT_NAME_RE = re.compile(r"(?:function|method|class)\s+`([a-zA-Z_]\w*)`", re.
 PROMPT_CALL_RE = re.compile(r"`([a-zA-Z_]\w*)\s*\(")
 PROMPT_DEF_RE = re.compile(r"\bdef\s+([a-zA-Z_]\w*)\s*\(")
 DISALLOWED_ENTRY_POINTS = set(dir(builtins)) | {"check", "candidate"}
+UNSUPPORTED_TEST_PATTERNS = [
+	("input_required", re.compile(r"\binput\s*\(", re.IGNORECASE)),
+	("file_io", re.compile(r"\b(open|os\.|pathlib\.|shutil|tempfile|glob|walk)\b", re.IGNORECASE)),
+	("network", re.compile(r"\b(requests|urllib|httpx|socket|flask|fastapi|aiohttp|http\.client)\b", re.IGNORECASE)),
+	("database", re.compile(r"\b(sqlite3|sqlalchemy|pymongo|psycopg|mysql|postgres)\b", re.IGNORECASE)),
+	("system_monitoring", re.compile(r"\bpsutil\b", re.IGNORECASE)),
+	("heavy_deps", re.compile(r"\b(matplotlib|wordcloud|pandas|numpy|sklearn|nltk|cv2|PIL|seaborn)\b", re.IGNORECASE)),
+	("subprocess", re.compile(r"\bsubprocess\b", re.IGNORECASE)),
+]
+UNSUPPORTED_PROMPT_PATTERNS = [
+	("file_or_dir_task", re.compile(r"\b(file|files|directory|directories|filesystem|path|folder|os\.walk|walk through)\b", re.IGNORECASE)),
+	("api_or_server_task", re.compile(r"\b(restful|flask|fastapi|endpoint|api server|web server)\b", re.IGNORECASE)),
+	("database_task", re.compile(r"\b(database|sqlite|sql|mongodb|postgres)\b", re.IGNORECASE)),
+]
 
 
 def parse_unit_tests(raw_tests: str | None) -> list[str] | str | None:
@@ -112,6 +126,19 @@ def extract_entry_point(unit_tests: list[str] | str | None, prompt: str | None =
 	return None
 
 
+def detect_unsupported_task(instruction: str | None, unit_tests: list[str]) -> list[str]:
+	reasons: list[str] = []
+	tests_blob = "\n".join(unit_tests)
+	prompt = instruction or ""
+	for label, pattern in UNSUPPORTED_TEST_PATTERNS:
+		if pattern.search(tests_blob):
+			reasons.append(f"test:{label}")
+	for label, pattern in UNSUPPORTED_PROMPT_PATTERNS:
+		if pattern.search(prompt):
+			reasons.append(f"prompt:{label}")
+	return reasons
+
+
 def iter_dataset_rows(start: int, limit: int) -> Iterable[dict]:
 	dataset = load_dataset(DATASET, CONFIG, split=SPLIT, streaming=True)
 	return islice(dataset, start, start + limit)
@@ -144,6 +171,8 @@ def main(argv: Iterable[str] | None = None) -> None:
 	output_path = f"opencodeinstruct_{args.rows_startfrom}_{args.rows_startfrom + args.rows_to_download}.jsonl"
 	count = 0
 	skipped_missing_entry_point = 0
+	skipped_unsupported_task = 0
+	unsupported_reason_counts: Counter[str] = Counter()
 	with open(output_path, "w", encoding="utf-8") as sink:
 		for fallback_idx, row in enumerate(iter_dataset_rows(args.rows_startfrom, args.rows_to_download)):
 			instruction = row.get("input")
@@ -152,6 +181,12 @@ def main(argv: Iterable[str] | None = None) -> None:
 			entry_point = extract_entry_point(parsed_tests, instruction)
 			if entry_point is None:
 				skipped_missing_entry_point += 1
+				continue
+			unsupported_reasons = detect_unsupported_task(instruction, parsed_tests)
+			if unsupported_reasons:
+				skipped_unsupported_task += 1
+				for reason in unsupported_reasons:
+					unsupported_reason_counts[reason] += 1
 				continue
 
 			row_idx = row.get("row_idx", args.rows_startfrom + fallback_idx)
@@ -167,6 +202,9 @@ def main(argv: Iterable[str] | None = None) -> None:
 	print(f"Saved {count} rows to {output_path}")
 	if skipped_missing_entry_point:
 		print(f"Skipped {skipped_missing_entry_point} rows: missing_entry_point")
+	if skipped_unsupported_task:
+		reason_summary = ", ".join(f"{reason}={amount}" for reason, amount in unsupported_reason_counts.most_common())
+		print(f"Skipped {skipped_unsupported_task} rows: unsupported_task ({reason_summary})")
 
 
 if __name__ == "__main__":

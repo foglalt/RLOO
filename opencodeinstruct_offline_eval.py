@@ -122,6 +122,11 @@ TEST_SKIP_PATTERNS = [
     ("random_maze", re.compile(r"\b(random|randrange)\b.*\bmaze\b|\bmaze\b.*\b(random|randrange)\b", re.IGNORECASE)),
     ("sleep_or_loop", re.compile(r"\btime\.sleep\b|while\s+True", re.IGNORECASE)),
 ]
+PROMPT_SKIP_PATTERNS = [
+    ("file_or_dir_task", re.compile(r"\b(file|files|directory|directories|filesystem|path|folder|os\.walk|walk through)\b", re.IGNORECASE)),
+    ("api_or_server_task", re.compile(r"\b(restful|flask|fastapi|endpoint|api server|web server)\b", re.IGNORECASE)),
+    ("database_task", re.compile(r"\b(database|sqlite|sql|mongodb|postgres)\b", re.IGNORECASE)),
+]
 
 
 def unwrap_code(text: str) -> str:
@@ -178,6 +183,14 @@ def detect_test_issues(unit_tests: list[str]) -> list[str]:
     matches: list[str] = []
     for label, pattern in TEST_SKIP_PATTERNS:
         if pattern.search(combined):
+            matches.append(label)
+    return matches
+
+
+def detect_prompt_issues(prompt: str) -> list[str]:
+    matches: list[str] = []
+    for label, pattern in PROMPT_SKIP_PATTERNS:
+        if pattern.search(prompt):
             matches.append(label)
     return matches
 
@@ -317,7 +330,9 @@ for row_id, instruction, tests, entry_point in tqdm(
         continue
 
     test_skip_reasons = detect_test_issues(tests)
-    if test_skip_reasons:
+    prompt_skip_reasons = detect_prompt_issues(instruction)
+    all_skip_reasons = test_skip_reasons + [f"prompt_{reason}" for reason in prompt_skip_reasons]
+    if all_skip_reasons:
         record = {
             "id": row_id,
             "instruction": instruction,
@@ -325,7 +340,7 @@ for row_id, instruction, tests, entry_point in tqdm(
             "tests_passed": 0,
             "tests_total": len(tests),
             "test_ratio": 0.0,
-            "errors": [f"skipped_test_issue: {', '.join(test_skip_reasons)}"],
+            "errors": [f"skipped_task_issue: {', '.join(all_skip_reasons)}"],
             "skipped": True,
         }
         results.append(record)

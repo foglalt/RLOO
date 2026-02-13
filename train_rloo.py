@@ -109,6 +109,20 @@ LORA_DROPOUT = 0.05
 LOGGING_STRATEGY = "no"
 SAVE_BEST_EVAL_CHECKPOINT = True
 BEST_EVAL_CHECKPOINT_DIRNAME = "best_eval_reward"
+UNSUPPORTED_TEST_PATTERNS = [
+    ("input_required", re.compile(r"\binput\s*\(", re.IGNORECASE)),
+    ("file_io", re.compile(r"\b(open|os\.|pathlib\.|shutil|tempfile|glob|walk)\b", re.IGNORECASE)),
+    ("network", re.compile(r"\b(requests|urllib|httpx|socket|flask|fastapi|aiohttp|http\.client)\b", re.IGNORECASE)),
+    ("database", re.compile(r"\b(sqlite3|sqlalchemy|pymongo|psycopg|mysql|postgres)\b", re.IGNORECASE)),
+    ("system_monitoring", re.compile(r"\bpsutil\b", re.IGNORECASE)),
+    ("heavy_deps", re.compile(r"\b(matplotlib|wordcloud|pandas|numpy|sklearn|nltk|cv2|PIL|seaborn)\b", re.IGNORECASE)),
+    ("subprocess", re.compile(r"\bsubprocess\b", re.IGNORECASE)),
+]
+UNSUPPORTED_PROMPT_PATTERNS = [
+    ("file_or_dir_task", re.compile(r"\b(file|files|directory|directories|filesystem|path|folder|os\.walk|walk through)\b", re.IGNORECASE)),
+    ("api_or_server_task", re.compile(r"\b(restful|flask|fastapi|endpoint|api server|web server)\b", re.IGNORECASE)),
+    ("database_task", re.compile(r"\b(database|sqlite|sql|mongodb|postgres)\b", re.IGNORECASE)),
+]
 
 
 def unwrap_code(text: str) -> str:
@@ -190,6 +204,18 @@ def evaluate_code(code_str: str, unit_tests: list[str], entry_point: str, timeou
     return ratio, errors
 
 
+def detect_unsupported_task(instruction: str, unit_tests: list[str]) -> list[str]:
+    reasons: list[str] = []
+    tests_blob = "\n".join(unit_tests)
+    for label, pattern in UNSUPPORTED_TEST_PATTERNS:
+        if pattern.search(tests_blob):
+            reasons.append(f"test:{label}")
+    for label, pattern in UNSUPPORTED_PROMPT_PATTERNS:
+        if pattern.search(instruction):
+            reasons.append(f"prompt:{label}")
+    return reasons
+
+
 def build_dataset(
     dataset_path: str,
     max_samples: int | None = None,
@@ -229,6 +255,8 @@ def build_dataset(
                 raise ValueError(
                     f"Invalid row at line {line_no} in {dataset_path}: missing_id"
                 )
+            if detect_unsupported_task(instruction, tests):
+                continue
             if exclude_row_ids is not None and row_id in exclude_row_ids:
                 continue
 
