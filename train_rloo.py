@@ -178,13 +178,33 @@ def evaluate_code(code_str: str, unit_tests: list[str], entry_point: str, timeou
 def build_dataset(dataset_path: str, max_samples: int | None = None) -> Dataset:
     rows: list[dict[str, Any]] = []
     with open(dataset_path, "r", encoding="utf-8") as fh:
-        for line in fh:
-            row = json.loads(line)
+        for line_no, line in enumerate(fh, start=1):
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Invalid JSON at line {line_no} in {dataset_path}: {exc}") from exc
+
             instruction = row.get("input")
             tests = row.get("unit_tests")
             entry_point = row.get("entry_point")
-            if not instruction or not isinstance(tests, list) or not tests or not entry_point:
-                continue
+
+            if not isinstance(instruction, str) or not instruction.strip():
+                raise ValueError(
+                    f"Invalid row at line {line_no} in {dataset_path}: missing_input (id={row.get('id')!r})"
+                )
+            if not isinstance(tests, list) or not tests:
+                raise ValueError(
+                    f"Invalid row at line {line_no} in {dataset_path}: invalid_unit_tests (id={row.get('id')!r})"
+                )
+            if not all(isinstance(test, str) and test.strip() for test in tests):
+                raise ValueError(
+                    f"Invalid row at line {line_no} in {dataset_path}: malformed_unit_test_entry (id={row.get('id')!r})"
+                )
+            if not isinstance(entry_point, str) or not entry_point.strip():
+                raise ValueError(
+                    f"Invalid row at line {line_no} in {dataset_path}: missing_entry_point (id={row.get('id')!r})"
+                )
+
             rows.append(
                 {
                     "prompt": PROMPT_PREFIX + instruction,
