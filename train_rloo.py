@@ -67,9 +67,13 @@ if __name__ == "__main__":
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train a Qwen model with TRL RLOO on OpenCodeInstruct")
     parser.add_argument("--model-id", required=True, help="Model path or HF id")
-    parser.add_argument("--dataset-path", required=True, help="JSONL exported by get_opencodeinstruct_dataset.py")
+    parser.add_argument(
+        "--dataset-path",
+        default="opencodeinstruct_0_30000.jsonl",
+        help="JSONL exported by get_opencodeinstruct_dataset.py",
+    )
     parser.add_argument("--output-dir", required=True, help="Where to save checkpoints")
-    parser.add_argument("--max-samples", type=int, default=None, help="Limit number of training samples")
+    parser.add_argument("--max-samples", type=int, default=30_000, help="Limit number of training samples")
     parser.add_argument("--learning-rate", type=float, default=1e-6)
     parser.add_argument("--max-steps", type=int, default=200)
     parser.add_argument("--per-device-train-batch-size", type=int, default=1)

@@ -143,22 +143,15 @@ def main(argv: Iterable[str] | None = None) -> None:
 
 	output_path = f"opencodeinstruct_{args.rows_startfrom}_{args.rows_startfrom + args.rows_to_download}.jsonl"
 	count = 0
-	skipped: Counter[str] = Counter()
+	skipped_missing_entry_point = 0
 	with open(output_path, "w", encoding="utf-8") as sink:
 		for fallback_idx, row in enumerate(iter_dataset_rows(args.rows_startfrom, args.rows_to_download)):
 			instruction = row.get("input")
-			if not isinstance(instruction, str) or not instruction.strip():
-				skipped["missing_input"] += 1
-				continue
-
 			parsed_tests = normalize_unit_tests(row.get("unit_tests"))
-			if not parsed_tests:
-				skipped["invalid_unit_tests"] += 1
-				continue
 
 			entry_point = extract_entry_point(parsed_tests, instruction)
 			if entry_point is None:
-				skipped["missing_entry_point"] += 1
+				skipped_missing_entry_point += 1
 				continue
 
 			row_idx = row.get("row_idx", args.rows_startfrom + fallback_idx)
@@ -171,11 +164,9 @@ def main(argv: Iterable[str] | None = None) -> None:
 			sink.write(json.dumps(record, ensure_ascii=False) + "\n")
 			count += 1
 
-	print(f"Saved {count} valid rows to {output_path}")
-	if skipped:
-		skipped_total = sum(skipped.values())
-		skipped_detail = ", ".join(f"{reason}={amount}" for reason, amount in sorted(skipped.items()))
-		print(f"Skipped {skipped_total} invalid rows: {skipped_detail}")
+	print(f"Saved {count} rows to {output_path}")
+	if skipped_missing_entry_point:
+		print(f"Skipped {skipped_missing_entry_point} rows: missing_entry_point")
 
 
 if __name__ == "__main__":
