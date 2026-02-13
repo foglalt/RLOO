@@ -7,6 +7,14 @@ import re
 import subprocess
 import sys
 from typing import Any
+import warnings
+
+QUIET_CONSOLE = True
+if QUIET_CONSOLE:
+    warnings.filterwarnings(
+        "ignore",
+        message=r"A NumPy version >=1\.23\.5 and <2\.3\.0 is required for this version of SciPy.*",
+    )
 
 import torch
 from datasets import Dataset
@@ -97,6 +105,9 @@ USE_LORA = False
 LORA_R = 16
 LORA_ALPHA = 32
 LORA_DROPOUT = 0.05
+LOGGING_STRATEGY = "no"
+SAVE_BEST_EVAL_CHECKPOINT = True
+BEST_EVAL_CHECKPOINT_DIRNAME = "best_eval_reward"
 
 
 def unwrap_code(text: str) -> str:
@@ -334,9 +345,11 @@ class PeriodicDiagnosticsCallback(TrainerCallback):
         reward_timeout_sec: int,
         every_n_steps: int,
         output_path: str,
+        model_output_dir: str,
         max_new_tokens: int,
         temperature: float,
         top_p: float,
+        save_best_model: bool,
     ) -> None:
         self.tokenizer = tokenizer
         self.train_samples = train_samples
@@ -344,11 +357,28 @@ class PeriodicDiagnosticsCallback(TrainerCallback):
         self.reward_timeout_sec = reward_timeout_sec
         self.every_n_steps = max(1, every_n_steps)
         self.output_path = Path(output_path)
+        self.model_output_dir = Path(model_output_dir)
         self.max_new_tokens = max_new_tokens
         self.temperature = temperature
         self.top_p = top_p
+        self.save_best_model = save_best_model
         self._last_logged_step = -1
+        self._best_eval_reward = float("-inf")
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
+        self.model_output_dir.mkdir(parents=True, exist_ok=True)
+
+    def _save_best_checkpoint(self, model, step: int, eval_reward: float) -> None:
+        checkpoint_dir = self.model_output_dir / BEST_EVAL_CHECKPOINT_DIRNAME
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        model_to_save = model.module if hasattr(model, "module") else model
+        model_to_save.save_pretrained(checkpoint_dir)
+        self.tokenizer.save_pretrained(checkpoint_dir)
+        metadata = {
+            "best_eval_reward": eval_reward,
+            "saved_at_step": step,
+        }
+        with open(checkpoint_dir / "best_eval_reward.json", "w", encoding="utf-8") as sink:
+            json.dump(metadata, sink, ensure_ascii=False, indent=2)
 
     def _record(self, state, model) -> None:
         step = int(state.global_step)
@@ -380,6 +410,12 @@ class PeriodicDiagnosticsCallback(TrainerCallback):
             if was_training:
                 model.train()
 
+        saved_new_best = False
+        if self.save_best_model and eval_avg_reward > self._best_eval_reward:
+            self._best_eval_reward = eval_avg_reward
+            self._save_best_checkpoint(model=model, step=step, eval_reward=eval_avg_reward)
+            saved_new_best = True
+
         record = {
             "step": step,
             "train_avg_reward": train_avg_reward,
@@ -388,14 +424,11 @@ class PeriodicDiagnosticsCallback(TrainerCallback):
             "eval_avg_reward": eval_avg_reward,
             "eval_success_ratio": eval_success_ratio,
             "eval_samples": eval_count,
+            "best_eval_reward_so_far": self._best_eval_reward,
+            "saved_new_best_checkpoint": saved_new_best,
         }
         with open(self.output_path, "a", encoding="utf-8") as sink:
             sink.write(json.dumps(record, ensure_ascii=False) + "\n")
-        print(
-            f"[diagnostics] step={step} "
-            f"train_avg_reward={train_avg_reward:.4f} train_success={train_success_ratio:.4f} "
-            f"eval_avg_reward={eval_avg_reward:.4f} eval_success={eval_success_ratio:.4f}"
-        )
         self._last_logged_step = step
 
     def on_step_end(self, args, state, control, **kwargs):  # noqa: ANN001
@@ -446,8 +479,6 @@ def main() -> None:
         exclude_row_ids=eval_row_ids,
         split_tag="train",
     )
-    print(f"Loaded train samples: {len(train_dataset)}")
-    print(f"Loaded eval samples: {len(eval_dataset)}")
 
     diagnostics_path = DIAGNOSTICS_FILE or str(Path(OUTPUT_DIR) / "diagnostics.jsonl")
     train_diagnostics_samples = sample_rows_for_diagnostics(train_dataset, TRAIN_DIAGNOSTICS_SAMPLES)
@@ -470,6 +501,10 @@ def main() -> None:
         do_eval=True,
         eval_strategy="steps",
         eval_steps=EVAL_STEPS,
+        logging_strategy=LOGGING_STRATEGY,
+        log_level="error",
+        log_level_replica="error",
+        disable_tqdm=False,
         learning_rate=LEARNING_RATE,
         max_steps=MAX_STEPS,
         per_device_train_batch_size=PER_DEVICE_TRAIN_BATCH_SIZE,
@@ -496,9 +531,11 @@ def main() -> None:
         reward_timeout_sec=REWARD_TIMEOUT_SEC,
         every_n_steps=DIAGNOSTICS_EVERY_STEPS,
         output_path=diagnostics_path,
+        model_output_dir=OUTPUT_DIR,
         max_new_tokens=DIAGNOSTICS_MAX_NEW_TOKENS,
         temperature=DIAGNOSTICS_TEMPERATURE,
         top_p=DIAGNOSTICS_TOP_P,
+        save_best_model=SAVE_BEST_EVAL_CHECKPOINT,
     )
     trainer = RLOOTrainer(
         model=model,
