@@ -78,7 +78,7 @@ def qwen_coder_chat(
 
 
 # %%
-dataset_path = "opencodeinstruct_train_29541.jsonl"
+dataset_path = "opencodeinstruct_train_10000.jsonl"
 assert os.path.exists(dataset_path), f"{dataset_path} not found"
 
 df = pd.read_json(dataset_path, lines=True)

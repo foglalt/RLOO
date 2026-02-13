@@ -16,3 +16,4 @@ ENV/
 # Evaluation artifacts
 humaneval_qwen2_5_instruction_eval.jsonl
 opencodeinstruct_qwen_eval.jsonl
+opencodeinstruct_0_*.jsonl
