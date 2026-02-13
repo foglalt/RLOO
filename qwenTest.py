@@ -5,9 +5,6 @@ import pandas as pd
 from tqdm import tqdm
 import re
 import json
-from evaluate import load
-import pickle
-import sys
 
 os.environ["CUDA_VISIBLE_DEVICES"] = os.environ.get("CUDA_VISIBLE_DEVICES", "2")
 
@@ -163,8 +160,6 @@ with open(output_jsonl, "w", encoding="utf-8") as f:
 mean_score = sum(r["score"] for r in results) / len(results)
 print(f"Mean test pass ratio over HumanEval (all-or-nothing): {mean_score:.4f}")
 # +
-import json
-
 output_jsonl = "humaneval_qwen2_5_instruction_eval.jsonl"
 
 results = []
@@ -184,6 +179,5 @@ print(f"Failed: {num_fail}")
 print(f"Pass@1 (test pass ratio): {pass_ratio:.4f}")
 
 # -
-
 
 
