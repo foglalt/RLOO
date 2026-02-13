@@ -42,6 +42,15 @@ def parse_unit_tests(raw_tests: str | None) -> list[str] | str | None:
 		return raw_tests
 
 
+def normalize_unit_tests(raw_tests: str | None) -> list[str]:
+	parsed = parse_unit_tests(raw_tests)
+	if isinstance(parsed, list):
+		return [test.strip() for test in parsed if isinstance(test, str) and test.strip()]
+	if isinstance(parsed, str) and parsed.strip():
+		return [parsed.strip()]
+	return []
+
+
 def _unit_tests_iterable(unit_tests: list[str] | str | None) -> Iterable[str]:
 	if unit_tests is None:
 		return ()
@@ -134,20 +143,39 @@ def main(argv: Iterable[str] | None = None) -> None:
 
 	output_path = f"opencodeinstruct_{args.rows_startfrom}_{args.rows_startfrom + args.rows_to_download}.jsonl"
 	count = 0
+	skipped: Counter[str] = Counter()
 	with open(output_path, "w", encoding="utf-8") as sink:
 		for fallback_idx, row in enumerate(iter_dataset_rows(args.rows_startfrom, args.rows_to_download)):
-			parsed_tests = parse_unit_tests(row.get("unit_tests"))
+			instruction = row.get("input")
+			if not isinstance(instruction, str) or not instruction.strip():
+				skipped["missing_input"] += 1
+				continue
+
+			parsed_tests = normalize_unit_tests(row.get("unit_tests"))
+			if not parsed_tests:
+				skipped["invalid_unit_tests"] += 1
+				continue
+
+			entry_point = extract_entry_point(parsed_tests, instruction)
+			if entry_point is None:
+				skipped["missing_entry_point"] += 1
+				continue
+
 			row_idx = row.get("row_idx", args.rows_startfrom + fallback_idx)
 			record = {
 				"id": row_idx,
-				"input": row.get("input"),
+				"input": instruction,
 				"unit_tests": parsed_tests,
-				"entry_point": extract_entry_point(parsed_tests, row.get("input")),
+				"entry_point": entry_point,
 			}
 			sink.write(json.dumps(record, ensure_ascii=False) + "\n")
 			count += 1
 
-	print(f"Saved {count} rows to {output_path}")
+	print(f"Saved {count} valid rows to {output_path}")
+	if skipped:
+		skipped_total = sum(skipped.values())
+		skipped_detail = ", ".join(f"{reason}={amount}" for reason, amount in sorted(skipped.items()))
+		print(f"Skipped {skipped_total} invalid rows: {skipped_detail}")
 
 
 if __name__ == "__main__":
