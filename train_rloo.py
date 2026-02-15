@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+from datetime import datetime
 import json
 from pathlib import Path
 import re
@@ -10,6 +11,7 @@ from typing import Any
 import warnings
 
 QUIET_CONSOLE = True
+PROGRESS_EVENT_LOGS = True
 if QUIET_CONSOLE:
     warnings.filterwarnings(
         "ignore",
@@ -18,6 +20,7 @@ if QUIET_CONSOLE:
 
 import torch
 from datasets import Dataset
+from tqdm.auto import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, TrainerCallback
 from trl import RLOOConfig, RLOOTrainer
 
@@ -82,18 +85,13 @@ LEARNING_RATE = 1e-6
 MAX_STEPS = 200
 PER_DEVICE_TRAIN_BATCH_SIZE = 1
 GRADIENT_ACCUMULATION_STEPS = 8
-NUM_GENERATIONS = 2
+NUM_GENERATIONS = 4
 MAX_PROMPT_LENGTH = 768
 MAX_COMPLETION_LENGTH = 256
 TEMPERATURE = 0.7
 TOP_P = 0.95
-LOGGING_STEPS = 10
-SAVE_STEPS = 100  # Used only if SAVE_STRATEGY is changed from "no".
-SAVE_STRATEGY = "no"
-EVAL_STEPS = 100
 SEED = 42
 USE_BF16 = False
-REPORT_TO = None  # Example: ["wandb"]
 REWARD_TIMEOUT_SEC = 30
 TRAIN_DIAGNOSTICS_SAMPLES = 100
 EVAL_DIAGNOSTICS_SAMPLES = 100
@@ -106,7 +104,6 @@ USE_LORA = False
 LORA_R = 16
 LORA_ALPHA = 32
 LORA_DROPOUT = 0.05
-LOGGING_STRATEGY = "no"
 SAVE_BEST_EVAL_CHECKPOINT = True
 BEST_EVAL_CHECKPOINT_DIRNAME = "best_eval_reward"
 UNSUPPORTED_TEST_PATTERNS = [
@@ -123,6 +120,13 @@ UNSUPPORTED_PROMPT_PATTERNS = [
     ("api_or_server_task", re.compile(r"\b(restful|flask|fastapi|endpoint|api server|web server)\b", re.IGNORECASE)),
     ("database_task", re.compile(r"\b(database|sqlite|sql|mongodb|postgres)\b", re.IGNORECASE)),
 ]
+
+
+def progress_log(message: str) -> None:
+    if not PROGRESS_EVENT_LOGS:
+        return
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    tqdm.write(f"[{timestamp}] [train_rloo] {message}")
 
 
 def unwrap_code(text: str) -> str:
@@ -220,7 +224,6 @@ def build_dataset(
     dataset_path: str,
     max_samples: int | None = None,
     exclude_row_ids: set[Any] | None = None,
-    split_tag: str = "train",
 ) -> Dataset:
     rows: list[dict[str, Any]] = []
     with open(dataset_path, "r", encoding="utf-8") as fh:
@@ -266,7 +269,6 @@ def build_dataset(
                     "unit_tests": tests,
                     "entry_point": entry_point,
                     "row_id": row_id,
-                    "split": split_tag,
                 }
             )
             if max_samples is not None and len(rows) >= max_samples:
@@ -414,6 +416,11 @@ class PeriodicDiagnosticsCallback(TrainerCallback):
         if step == self._last_logged_step:
             return
 
+        progress_log(
+            f"Diagnostics started at step={step} on "
+            f"{len(self.train_samples)} train + {len(self.eval_samples)} eval samples."
+        )
+
         was_training = model.training
         model.eval()
         try:
@@ -459,6 +466,11 @@ class PeriodicDiagnosticsCallback(TrainerCallback):
         with open(self.output_path, "a", encoding="utf-8") as sink:
             sink.write(json.dumps(record, ensure_ascii=False) + "\n")
         self._last_logged_step = step
+        progress_log(
+            f"Diagnostics finished at step={step}: "
+            f"train_avg_reward={train_avg_reward:.4f}, eval_avg_reward={eval_avg_reward:.4f}, "
+            f"saved_new_best_checkpoint={saved_new_best}."
+        )
 
     def on_step_end(self, args, state, control, **kwargs):  # noqa: ANN001
         del args
@@ -500,14 +512,20 @@ def maybe_build_peft_config():
 
 
 def main() -> None:
-    eval_dataset = build_dataset(EVAL_PATH, split_tag="eval")
+    progress_log(
+        f"Config loaded: max_steps={MAX_STEPS}, "
+        f"diagnostics_every_steps={DIAGNOSTICS_EVERY_STEPS}, "
+        f"num_generations={NUM_GENERATIONS}."
+    )
+
+    eval_dataset = build_dataset(EVAL_PATH)
     eval_row_ids = {row["row_id"] for row in eval_dataset}
     train_dataset = build_dataset(
         DATASET_PATH,
         max_samples=MAX_SAMPLES,
         exclude_row_ids=eval_row_ids,
-        split_tag="train",
     )
+    progress_log(f"Datasets ready: train={len(train_dataset)}, eval={len(eval_dataset)}.")
 
     diagnostics_path = DIAGNOSTICS_FILE or str(Path(OUTPUT_DIR) / "diagnostics.jsonl")
     train_diagnostics_samples = sample_rows_for_diagnostics(train_dataset, TRAIN_DIAGNOSTICS_SAMPLES)
@@ -527,32 +545,26 @@ def main() -> None:
 
     rloo_args = RLOOConfig(
         output_dir=OUTPUT_DIR,
-        do_eval=True,
-        eval_strategy="steps",
-        eval_steps=EVAL_STEPS,
-        save_strategy=SAVE_STRATEGY,
-        logging_strategy=LOGGING_STRATEGY,
+        do_eval=False,
+        eval_strategy="no",
+        save_strategy="no",
+        logging_strategy="no",
         log_level="error",
         log_level_replica="error",
         disable_tqdm=False,
         learning_rate=LEARNING_RATE,
         max_steps=MAX_STEPS,
         per_device_train_batch_size=PER_DEVICE_TRAIN_BATCH_SIZE,
-        per_device_eval_batch_size=PER_DEVICE_TRAIN_BATCH_SIZE,
         gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
         num_generations=NUM_GENERATIONS,
         max_prompt_length=MAX_PROMPT_LENGTH,
         max_completion_length=MAX_COMPLETION_LENGTH,
         temperature=TEMPERATURE,
         top_p=TOP_P,
-        logging_steps=LOGGING_STEPS,
-        save_steps=SAVE_STEPS,
-        save_only_model=True,
-        save_total_limit=1,
         seed=SEED,
         bf16=USE_BF16,
         remove_unused_columns=False,
-        report_to=REPORT_TO,
+        report_to=None,
     )
 
     reward_fn = make_reward_fn(timeout_sec=REWARD_TIMEOUT_SEC)
@@ -574,12 +586,15 @@ def main() -> None:
         reward_funcs=reward_fn,
         args=rloo_args,
         train_dataset=train_dataset,
-        eval_dataset=eval_dataset,
         processing_class=tokenizer,
         callbacks=[diagnostics_callback],
         peft_config=maybe_build_peft_config(),
     )
 
+    progress_log(
+        "Training started. Main tqdm bar = training steps. "
+        "Trainer evaluation is disabled; diagnostics logs are the only evaluation output."
+    )
     trainer.train()
     trainer.save_state()
     trainer.save_model(OUTPUT_DIR)

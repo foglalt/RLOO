@@ -66,20 +66,13 @@ assert os.path.exists(humaneval_path), f"{humaneval_path} not found"
 humaneval_df = pd.read_json(humaneval_path, lines=True)
 
 descriptions, test_codes, entry_points = list(humaneval_df["instruction"]), list(humaneval_df["test"]), list(humaneval_df["entry_point"])
-
-example_id = 0
-print(f'{descriptions[example_id]}\n{test_codes[example_id]}\n{entry_points[example_id]}')
-description, test, entry_point = descriptions[example_id], test_codes[example_id], entry_points[example_id]
-
-
+if "task_id" in humaneval_df.columns:
+    task_ids = list(humaneval_df["task_id"])
+else:
+    task_ids = list(range(len(descriptions)))
 
 # +
-
 prompt_start = 'You are an expert Python coding assistant.\nFollow these rules when solving the task below:\n- Implement the requested function exactly once using the provided signature.\n- Return efficient, idiomatic Python 3 code.\n- Do not include markdown, explanations, tests, or extra helper text—only executable code.\n'
-prompt_end = description
-
-response = qwen_coder_chat(prompt_start+prompt_end)
-print(response)
 # +
 def unwrap_code(text: str) -> str:
     """
@@ -93,9 +86,6 @@ def unwrap_code(text: str) -> str:
     if code_blocks:
         return code_blocks[-1].strip()
     return text_without_think.strip()
-
-code = unwrap_code(response)
-print(code)
 
 
 # +
@@ -179,16 +169,13 @@ if __name__ == "__main__":
         return 0.0, f"code_exec_error: {result.get('error', 'unknown')}"
     return 0.0, f"test_exec_error: {result.get('error', 'unknown')}"
 
-result, error = evaluate_single_sample(code,test,entry_point)
-print(f'result:{result} error:{error}')
-
 # +
 results = []
 output_jsonl = "humaneval_qwen2_5_instruction_eval.jsonl"
 
-for idx, (instruction, test_code, entry_point) in enumerate(
+for idx, (instruction, test_code, entry_point, task_id) in enumerate(
     tqdm(
-        list(zip(descriptions, test_codes, entry_points, strict=True)),
+        zip(descriptions, test_codes, entry_points, task_ids, strict=True),
         total=len(descriptions),
         desc="HumanEval instruction eval with Qwen2.5-Coder-1.5B",
     )
@@ -200,9 +187,7 @@ for idx, (instruction, test_code, entry_point) in enumerate(
     score, error = evaluate_single_sample(generated_code, test_code, entry_point)
 
     rec = {
-        "id": humaneval_df.get("task_id", pd.Series([idx]))[idx]
-        if "task_id" in humaneval_df.columns
-        else idx,
+        "id": task_id,
         "instruction": instruction,
         "generated_code": generated_code,
         "score": score,  # ratio of tests passing (all-or-nothing here)
@@ -238,4 +223,3 @@ print(f"Failed: {num_fail}")
 print(f"Pass@1 (test pass ratio): {pass_ratio:.4f}")
 
 # -
-

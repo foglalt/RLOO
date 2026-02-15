@@ -89,16 +89,8 @@ if "id" in df.columns:
 else:
     row_ids = list(range(len(df)))
 
-example_id = 20
-description, tests, entry_point = descriptions[example_id], unit_tests[example_id], entry_points[example_id]
-print(f'{description}\n{tests}\n{entry_point}')
-
 # %%
 prompt_start = 'You are an expert Python coding assistant.\nFollow these rules when solving the task below:\n- Implement the requested function exactly once using the provided signature.\n- Return efficient, idiomatic Python 3 code.\n- Do not include markdown, explanations, tests, or extra helper text—only executable code.\n'
-prompt_end = description
-
-response = qwen_coder_chat(prompt_start+prompt_end)
-print(response)
 
 
 # %% Helper filters and execution guards
@@ -237,10 +229,6 @@ if __name__ == "__main__":
 """
 
 
-code = unwrap_code(response)
-print(code)
-
-
 # %%
 def evaluate_sample(code_str: str, unit_tests: list[str], entry_point: str | None) -> tuple[float, int, int, list[str]]:
     payload = {
@@ -287,9 +275,6 @@ def evaluate_sample(code_str: str, unit_tests: list[str], entry_point: str | Non
         errors = [f"evaluator_protocol_error: invalid_errors_field: {errors!r}"]
     ratio = passed / total if total else 0.0
     return ratio, passed, total, errors
-
-ratio, passed, total, errors = evaluate_sample(code,tests,entry_point)
-print(f"{ratio} {passed} {total} {errors}")
 
 # %%
 results: list[dict[str, object]] = []
