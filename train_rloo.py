@@ -520,7 +520,7 @@ def main() -> None:
     dtype = torch.bfloat16 if USE_BF16 else torch.float16
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_ID,
-        torch_dtype=dtype,
+        dtype=dtype,
         trust_remote_code=True,
         device_map="auto",
     )
