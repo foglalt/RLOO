@@ -91,7 +91,9 @@ MAX_COMPLETION_LENGTH = 256
 TEMPERATURE = 0.7
 TOP_P = 0.95
 SEED = 42
-USE_BF16 = False
+USE_BF16 = True
+GENERATION_REMOVE_INVALID_VALUES = True
+GENERATION_RENORMALIZE_LOGITS = True
 REWARD_TIMEOUT_SEC = 30
 TRAIN_DIAGNOSTICS_SAMPLES = 100
 EVAL_DIAGNOSTICS_SAMPLES = 100
@@ -322,6 +324,8 @@ def generate_completion(
             temperature=temperature,
             top_p=top_p,
             pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
+            remove_invalid_values=GENERATION_REMOVE_INVALID_VALUES,
+            renormalize_logits=GENERATION_RENORMALIZE_LOGITS,
         )
     generated_ids = outputs[0][inputs["input_ids"].shape[1]:]
     return tokenizer.decode(generated_ids, skip_special_tokens=True)
@@ -515,7 +519,9 @@ def main() -> None:
     progress_log(
         f"Config loaded: max_steps={MAX_STEPS}, "
         f"diagnostics_every_steps={DIAGNOSTICS_EVERY_STEPS}, "
-        f"num_generations={NUM_GENERATIONS}."
+        f"num_generations={NUM_GENERATIONS}, use_bf16={USE_BF16}, "
+        f"remove_invalid_values={GENERATION_REMOVE_INVALID_VALUES}, "
+        f"renormalize_logits={GENERATION_RENORMALIZE_LOGITS}."
     )
 
     eval_dataset = build_dataset(EVAL_PATH)
@@ -538,10 +544,16 @@ def main() -> None:
     dtype = torch.bfloat16 if USE_BF16 else torch.float16
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_ID,
-        dtype=dtype,
+        torch_dtype=dtype,
         trust_remote_code=True,
-        device_map="auto",
     )
+    embedding_size = model.get_input_embeddings().weight.shape[0]
+    tokenizer_size = len(tokenizer)
+    if tokenizer_size > embedding_size:
+        raise ValueError(
+            f"Tokenizer size ({tokenizer_size}) is larger than model embedding size ({embedding_size}). "
+            "This can trigger CUDA device-side asserts during generation."
+        )
 
     rloo_args = RLOOConfig(
         output_dir=OUTPUT_DIR,
@@ -561,6 +573,10 @@ def main() -> None:
         max_completion_length=MAX_COMPLETION_LENGTH,
         temperature=TEMPERATURE,
         top_p=TOP_P,
+        generation_kwargs={
+            "remove_invalid_values": GENERATION_REMOVE_INVALID_VALUES,
+            "renormalize_logits": GENERATION_RENORMALIZE_LOGITS,
+        },
         seed=SEED,
         bf16=USE_BF16,
         remove_unused_columns=False,
