@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import time
 from typing import Any
 import warnings
 
@@ -82,7 +83,7 @@ EVAL_PATH = "opencodeinstruct_eval_100.jsonl"
 OUTPUT_DIR = "runs/qwen_rloo"
 MAX_SAMPLES = 10_000
 LEARNING_RATE = 1e-6
-MAX_STEPS = 200
+MAX_STEPS = 5000
 PER_DEVICE_TRAIN_BATCH_SIZE = 1
 GRADIENT_ACCUMULATION_STEPS = 8
 NUM_GENERATIONS = 4
@@ -95,9 +96,11 @@ USE_BF16 = True
 GENERATION_REMOVE_INVALID_VALUES = True
 GENERATION_RENORMALIZE_LOGITS = True
 REWARD_TIMEOUT_SEC = 30
+REWARD_DEBUG_LOG_FIRST_CALLS = 5
+REWARD_DEBUG_LOG_EVERY_COMPLETIONS = 4
 TRAIN_DIAGNOSTICS_SAMPLES = 100
 EVAL_DIAGNOSTICS_SAMPLES = 100
-DIAGNOSTICS_EVERY_STEPS = 100
+DIAGNOSTICS_EVERY_STEPS = 200
 DIAGNOSTICS_FILE = None  # Defaults to OUTPUT_DIR/diagnostics.jsonl when None.
 DIAGNOSTICS_MAX_NEW_TOKENS = 256
 DIAGNOSTICS_TEMPERATURE = 0.2
@@ -281,14 +284,40 @@ def build_dataset(
 
 
 def make_reward_fn(timeout_sec: int):
+    call_count = 0
+
     def reward_fn(prompts, completions, unit_tests, entry_point, **kwargs):  # noqa: ANN001
+        nonlocal call_count
+        call_count += 1
         del prompts, kwargs
         rewards: list[float] = []
+        debug_this_call = call_count <= REWARD_DEBUG_LOG_FIRST_CALLS
+        start_time = time.perf_counter()
+        if debug_this_call:
+            progress_log(
+                f"reward_fn call={call_count}: scoring {len(completions)} completions "
+                f"(timeout={timeout_sec}s each)."
+            )
+
         for completion, tests, target in zip(completions, unit_tests, entry_point, strict=True):
             text = completion_to_text(completion)
             code = unwrap_code(text)
             score, _ = evaluate_code(code, tests, target, timeout_sec=timeout_sec)
             rewards.append(float(score))
+            if debug_this_call and len(rewards) % max(1, REWARD_DEBUG_LOG_EVERY_COMPLETIONS) == 0:
+                elapsed = time.perf_counter() - start_time
+                progress_log(
+                    f"reward_fn call={call_count}: scored {len(rewards)}/{len(completions)} "
+                    f"in {elapsed:.1f}s."
+                )
+
+        if debug_this_call:
+            elapsed = time.perf_counter() - start_time
+            avg_reward = sum(rewards) / len(rewards) if rewards else 0.0
+            progress_log(
+                f"reward_fn call={call_count} finished in {elapsed:.1f}s "
+                f"(avg_reward={avg_reward:.4f})."
+            )
         return rewards
 
     return reward_fn
@@ -515,11 +544,20 @@ def maybe_build_peft_config():
     )
 
 
+def resolve_training_dtype() -> tuple[torch.dtype, bool]:
+    if USE_BF16:
+        if torch.cuda.is_available() and torch.cuda.is_bf16_supported():
+            return torch.bfloat16, True
+        progress_log("USE_BF16=True but bf16 is unsupported on this machine. Falling back to float16.")
+    return torch.float16, False
+
+
 def main() -> None:
     progress_log(
         f"Config loaded: max_steps={MAX_STEPS}, "
         f"diagnostics_every_steps={DIAGNOSTICS_EVERY_STEPS}, "
         f"num_generations={NUM_GENERATIONS}, use_bf16={USE_BF16}, "
+        f"reward_timeout_sec={REWARD_TIMEOUT_SEC}, "
         f"remove_invalid_values={GENERATION_REMOVE_INVALID_VALUES}, "
         f"renormalize_logits={GENERATION_RENORMALIZE_LOGITS}."
     )
@@ -541,7 +579,8 @@ def main() -> None:
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    dtype = torch.bfloat16 if USE_BF16 else torch.float16
+    dtype, use_bf16_runtime = resolve_training_dtype()
+    progress_log(f"Runtime dtype resolved to {dtype} (bf16_training={use_bf16_runtime}).")
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_ID,
         torch_dtype=dtype,
@@ -578,7 +617,7 @@ def main() -> None:
             "renormalize_logits": GENERATION_RENORMALIZE_LOGITS,
         },
         seed=SEED,
-        bf16=USE_BF16,
+        bf16=use_bf16_runtime,
         remove_unused_columns=False,
         report_to=None,
     )
